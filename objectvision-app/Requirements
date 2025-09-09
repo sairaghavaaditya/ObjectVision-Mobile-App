@@ -1,0 +1,67 @@
+Requirements for Object Detection Mobile Application
+1. Overview
+
+The Object Detection mobile application is developed using React Native with Expo Router for navigation. It allows users to capture an image using the device’s camera or select one from the gallery, send it to a backend API (FastAPI), and display detection results (bounding boxes + labels) over the image.
+
+2. Functional Requirements
+2.1 Image Input
+
+Users should be able to capture an image using the device camera.
+
+Users should be able to select an image from their gallery.
+
+2.2 API Communication
+
+The app should send the selected image to the backend API endpoint (http://YOUR_API_URL/detect) as multipart/form-data.
+
+On success, the API will return a JSON response with detected objects (class, confidence, bounding box).
+
+On failure, the app should display an error alert.
+
+2.3 Detection Results
+
+After receiving detections, the app should navigate to a results screen.
+
+The results screen should:
+
+Display the selected image.
+
+Draw bounding boxes with labels (class + confidence score) over the image.
+
+Show a list of detected objects below the image.
+
+2.4 User Interface
+
+Main screen: two buttons
+
+Take Photo
+
+Pick from Gallery
+
+Loading state: show a spinner while the image is being processed.
+
+Results screen: image preview with bounding boxes and detection list.
+
+3. Non-Functional Requirements
+
+Must run smoothly on both Android and iOS devices.
+
+Built with Expo framework for easy development and testing.
+
+Code should be modular, clean, and maintainable.
+
+API calls should handle timeouts and errors gracefully.
+
+The app should work without external database (images are processed per session).
+
+4. Optional / Future Enhancements
+
+Add option to save detection results locally.
+
+Add history page for past detections.
+
+Support for multiple object detection models via API.
+
+Add dark mode.
+
+Add user authentication if backend requires it.
