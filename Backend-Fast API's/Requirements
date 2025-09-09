@@ -1,0 +1,113 @@
+Requirements for FastAPI Object Detection Backend
+1. Overview
+
+The backend will be built using FastAPI and serve as the engine for the mobile object detection app. It will receive an uploaded image, process it using a YOLOv8 model, and return detection results in JSON format.
+
+2. Functional Requirements
+2.1 API Endpoints
+2.1.1 Test Endpoint
+
+Method: GET
+
+Path: /
+
+Description: Returns a simple confirmation message to verify that the API is running.
+
+Response:
+
+{ "message": "API is running!" }
+
+2.1.2 Detection Endpoint
+
+Method: POST
+
+Path: /detect
+
+Input:
+
+Accept an image file (.jpg, .png, .jpeg, etc.) via multipart/form-data.
+
+Processing:
+
+Read and decode the image.
+
+Convert it into a format suitable for YOLOv8 (e.g., NumPy array).
+
+Run inference using a pre-loaded YOLOv8 model.
+
+Filter out detections with confidence < 0.7.
+
+Response:
+
+{
+  "detections": [
+    {
+      "class": "dog",
+      "confidence": 0.95,
+      "box": [150, 200, 300, 450]
+    },
+    {
+      "class": "person",
+      "confidence": 0.88,
+      "box": [50, 100, 250, 400]
+    }
+  ]
+}
+
+3. Model Management
+
+Load the YOLOv8 model (yolov8n.pt) once at server startup.
+
+Model file will be present in the same directory as the API script (main.py).
+
+Use Ultralytics YOLO library for inference.
+
+4. Technology Stack
+
+Language: Python 3.x
+
+Framework: FastAPI
+
+Dependencies:
+
+fastapi (web framework)
+
+uvicorn (ASGI server)
+
+ultralytics (YOLOv8 model)
+
+numpy (array operations)
+
+torch (PyTorch backend)
+
+PIL (image handling)
+
+io (image file reading)
+
+5. Non-Functional Requirements
+
+The API should start with:
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+Must return results quickly and efficiently.
+
+Should be able to handle multiple requests concurrently.
+
+Error handling:
+
+Invalid file type → return error JSON.
+
+Model failure → return error JSON.
+
+6. Future Enhancements
+
+Support multiple models (switch between YOLO versions).
+
+Add GPU support if available.
+
+Add authentication for API access.
+
+Allow returning annotated image (with bounding boxes) in addition to JSON.
