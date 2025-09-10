@@ -15,6 +15,9 @@ from PIL import Image, ImageDraw, ImageFont
 from pydantic import BaseModel
 from ultralytics import YOLO
 from fastapi.responses import StreamingResponse
+from torchvision import transforms, models
+import torch.nn.functional as F
+import json
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -22,6 +25,8 @@ logger = logging.getLogger(__name__)
 
 # Global model variable
 model: Optional[YOLO] = None
+classifier_model: Optional[torch.nn.Module] = None
+imagenet_idx_to_label: Optional[dict] = None
 device: Optional[torch.device] = None
 
 
@@ -48,6 +53,7 @@ def fix_pytorch_compatibility():
 async def lifespan(app: FastAPI):
     """Manage application lifespan - load model on startup, cleanup on shutdown"""
     global model, device
+    global classifier_model, imagenet_idx_to_label
     
     # Startup
     logger.info("Starting up FastAPI Object Detection Backend...")
@@ -73,6 +79,18 @@ async def lifespan(app: FastAPI):
         logger.info("YOLOv8 model loaded successfully")
         logger.info(f"Model can detect {len(model.model.names)} classes")
         logger.info(f"Available classes: {list(model.model.names.values())[:10]}...")
+
+        # Load Imagenet classifier (ResNet50) lazily at startup
+        try:
+            classifier_model = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
+            classifier_model.eval()
+            classifier_model.to(device)
+            # Build index to label map from weights metadata
+            weights = models.ResNet50_Weights.DEFAULT
+            imagenet_idx_to_label = {i: c for i, c in enumerate(weights.meta["categories"])}
+            logger.info("ResNet50 ImageNet classifier loaded")
+        except Exception as e:
+            logger.warning(f"Failed to load ImageNet classifier: {e}")
     except Exception as e:
         logger.error(f"Failed to load YOLOv8 model: {e}")
         raise RuntimeError(f"Model loading failed: {e}")
@@ -98,9 +116,17 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=[
+        "X-Detections-Count",
+        "X-Processing-Time",
+        "X-Image-Width",
+        "X-Image-Height",
+        "X-Cls-Label",
+        "X-Cls-Prob",
+    ],
 )
 
 
@@ -286,6 +312,61 @@ def draw_annotated_image(image_array: np.ndarray, detections: List[Detection]) -
     buf.seek(0)
     return buf
 
+def resize_for_detection(image_array: np.ndarray, target_long_side: int) -> tuple[np.ndarray, dict]:
+    """Resize keeping aspect ratio so the longer side equals target_long_side. Returns resized array and info."""
+    if target_long_side <= 0:
+        h, w = image_array.shape[:2]
+        return image_array, {"width": w, "height": h, "scale": 1.0}
+    h, w = image_array.shape[:2]
+    long_side = max(h, w)
+    if long_side == target_long_side:
+        return image_array, {"width": w, "height": h, "scale": 1.0}
+    scale = target_long_side / float(long_side)
+    new_w = int(round(w * scale))
+    new_h = int(round(h * scale))
+    pil_img = Image.fromarray(image_array).resize((new_w, new_h), Image.BILINEAR)
+    return np.array(pil_img), {"width": new_w, "height": new_h, "scale": scale}
+
+
+def run_classification(image_array: np.ndarray, topk: int = 5, mode: str = "warp") -> dict:
+    """Run ImageNet classification and return top-1 and top-k results.
+    mode: "warp" resizes to 224x224 without cropping; "crop" uses 256->center crop 224.
+    """
+    global classifier_model, device, imagenet_idx_to_label
+    if classifier_model is None:
+        raise HTTPException(status_code=500, detail="Classifier not loaded")
+
+    if mode == "crop":
+        preprocess = transforms.Compose([
+            transforms.ToPILImage(),
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+    else:
+        preprocess = transforms.Compose([
+            transforms.ToPILImage(),
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+
+    try:
+        with torch.no_grad():
+            input_tensor = preprocess(image_array).unsqueeze(0).to(device)
+            logits = classifier_model(input_tensor)
+            probs = F.softmax(logits, dim=1).cpu().numpy()[0]
+            top_indices = np.argsort(probs)[-topk:][::-1].tolist()
+            top = []
+            for idx in top_indices:
+                label = imagenet_idx_to_label.get(idx, str(idx)) if imagenet_idx_to_label else str(idx)
+                top.append({"index": int(idx), "label": label, "probability": float(probs[idx])})
+            top1 = top[0] if len(top) > 0 else {"index": -1, "label": "unknown", "probability": 0.0}
+            return {"top1": top1, "topk": top, "mode": mode}
+    except Exception as e:
+        logger.error(f"Classification error: {e}")
+        raise HTTPException(status_code=500, detail=f"Classification failed: {str(e)}")
 
 # API Endpoints
 @app.get("/")
@@ -297,7 +378,8 @@ async def test_endpoint():
 @app.post("/detect", response_model=DetectionResponse)
 async def detect_objects(
     file: UploadFile = File(..., description="Image file to analyze"),
-    confidence: float = 0.7
+    confidence: float = 0.7,
+    detect_size: int = 0
 ):
     """
     Detect objects in uploaded image using YOLOv8
@@ -327,6 +409,11 @@ async def detect_objects(
         
         # Process image
         image_array, image_info = process_uploaded_image(file)
+        # Optional resize for detection
+        resized_array, resize_info = resize_for_detection(image_array, detect_size)
+        if detect_size > 0:
+            image_array = resized_array
+            image_info["resized_dimensions"] = {"width": resize_info["width"], "height": resize_info["height"], "scale": resize_info["scale"]}
         
         # Run inference
         detections = run_inference(image_array, confidence)
@@ -445,7 +532,9 @@ async def detect_objects(
 @app.post("/detect-image")
 async def detect_image(
     file: UploadFile = File(..., description="Image file to analyze"),
-    confidence: float = 0.3
+    confidence: float = 0.3,
+    classify_mode: str = "warp",
+    detect_size: int = 0
 ):
     """
     Detect objects and return an annotated image (PNG) with boxes and labels drawn.
@@ -462,11 +551,27 @@ async def detect_image(
     validate_image_file(file)
     image_array, image_info = process_uploaded_image(file)
 
+    # Optional resize for detection
+    resized_array, resize_info = resize_for_detection(image_array, detect_size)
+    detect_array = resized_array if detect_size > 0 else image_array
+
     # Inference
-    detections = run_inference(image_array, confidence)
+    detections = run_inference(detect_array, confidence)
+
+    # Classification (best-effort)
+    cls_label = None
+    cls_prob = None
+    cls_mode = classify_mode
+    try:
+        cls = run_classification(image_array, topk=5, mode=classify_mode if classify_mode in ("warp", "crop") else "warp")
+        cls_label = cls.get("top1", {}).get("label")
+        cls_prob = cls.get("top1", {}).get("probability")
+        cls_mode = cls.get("mode", cls_mode)
+    except Exception as e:
+        logger.warning(f"Classification skipped: {e}")
 
     # Draw
-    buf = draw_annotated_image(image_array, detections)
+    buf = draw_annotated_image(detect_array, detections)
 
     # Build response with useful headers for the app
     headers = {
@@ -475,9 +580,32 @@ async def detect_image(
         "X-Image-Width": str(image_info.get("dimensions", {}).get("width", 0)),
         "X-Image-Height": str(image_info.get("dimensions", {}).get("height", 0)),
     }
+    if cls_label is not None:
+        headers["X-Cls-Label"] = cls_label
+    if cls_prob is not None:
+        headers["X-Cls-Prob"] = f"{cls_prob:.4f}"
+    if cls_mode:
+        headers["X-Cls-Mode"] = cls_mode
+    if detect_size > 0:
+        headers["X-Detect-Resized-Width"] = str(resize_info["width"]) 
+        headers["X-Detect-Resized-Height"] = str(resize_info["height"]) 
+        headers["X-Detect-Scale"] = f"{resize_info['scale']:.6f}"
 
     return StreamingResponse(buf, media_type="image/png", headers=headers)
 
+@app.post("/classify")
+async def classify_image(
+    file: UploadFile = File(..., description="Image file to classify"),
+    classify_mode: str = "warp"
+):
+    validate_image_file(file)
+    image_array, image_info = process_uploaded_image(file)
+    cls = run_classification(image_array, topk=5, mode=classify_mode if classify_mode in ("warp", "crop") else "warp")
+    return {
+        "success": True,
+        "image_info": image_info,
+        "classification": cls,
+    }
 
 @app.get("/health")
 async def health_check():
