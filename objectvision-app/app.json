@@ -36,7 +36,7 @@
       ]
     ],
     "extra": {
-      "API_BASE": "http://192.168.0.100:8000"
+      "API_BASE": "http://192.168.29.242:8000"
     },
     "experiments": {
       "typedRoutes": true

@@ -16,6 +16,8 @@ import {
   TouchableOpacity,
   View
 } from 'react-native';
+import * as FileSystem from 'expo-file-system';
+import { Platform } from 'react-native';
 
 const { width } = Dimensions.get('window');
 
@@ -24,6 +26,8 @@ export default function HomeScreen() {
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
   const [selectedImageSize, setSelectedImageSize] = useState<{ width: number; height: number } | null>(null);
   const [isDetecting, setIsDetecting] = useState(false);
+  const [lastError, setLastError] = useState<string | null>(null);
+  const [healthStatus, setHealthStatus] = useState<string | null>(null);
   const router = useRouter();
   
   const backgroundColor = useThemeColor({}, 'background');
@@ -56,15 +60,11 @@ export default function HomeScreen() {
   }
 
   const requestPermissions = async () => {
-    const { status: cameraStatus } = await ImagePicker.requestCameraPermissionsAsync();
-    const { status: mediaStatus } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    
-    if (cameraStatus !== 'granted' || mediaStatus !== 'granted') {
-      Alert.alert(
-        'Permissions Required',
-        'Camera and media library permissions are required to use this app.',
-        [{ text: 'OK' }]
-      );
+    if (Platform.OS === 'web') return true;
+    const camera = await ImagePicker.requestCameraPermissionsAsync();
+    const media = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (camera.status !== 'granted' || media.status !== 'granted') {
+      Alert.alert('Permissions Required', 'Camera and media library permissions are required to use this app.', [{ text: 'OK' }]);
       return false;
     }
     return true;
@@ -77,17 +77,45 @@ export default function HomeScreen() {
     setIsLoading(true);
 
     try {
-      let result;
-      
+      if (Platform.OS === 'web') {
+        // Web fallback: use a hidden file input for reliable selection
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = 'image/*';
+        if (source === 'camera') (input as any).capture = 'environment';
+        input.onchange = async () => {
+          const file = input.files && input.files[0];
+          if (!file) {
+            setIsLoading(false);
+            return;
+          }
+          const objectUrl = URL.createObjectURL(file);
+          setSelectedImage(objectUrl);
+          try {
+            // Attempt to read dimensions
+            const img = new Image();
+            img.onload = () => {
+              setSelectedImageSize({ width: img.width, height: img.height });
+              URL.revokeObjectURL(objectUrl);
+            };
+            img.src = objectUrl;
+          } catch {}
+          setIsLoading(false);
+        };
+        input.click();
+        return;
+      }
+
+      let result: ImagePicker.ImagePickerResult;
       if (source === 'camera') {
         result = await ImagePicker.launchCameraAsync({
-          mediaTypes: ImagePicker.MediaTypeOptions.Images,
+          mediaTypes: ImagePicker.MediaTypeOptions.Images as any,
           allowsEditing: false,
           quality: 1,
         });
       } else {
         result = await ImagePicker.launchImageLibraryAsync({
-          mediaTypes: ImagePicker.MediaTypeOptions.Images,
+          mediaTypes: ImagePicker.MediaTypeOptions.Images as any,
           allowsEditing: false,
           quality: 1,
         });
@@ -99,53 +127,77 @@ export default function HomeScreen() {
         if (asset.width && asset.height) setSelectedImageSize({ width: asset.width, height: asset.height });
       }
     } catch (error) {
-      Alert.alert(
-        'Error',
-        'Failed to select image. Please try again.',
-        [{ text: 'OK' }]
-      );
+      Alert.alert('Error', 'Failed to select image. Please try again.', [{ text: 'OK' }]);
     } finally {
       setIsLoading(false);
     }
   };
 
   const handleDetectObjects = async () => {
-    if (!selectedImage) return;
+    if (!selectedImage) {
+      Alert.alert('No image', 'Please select an image from Camera or Gallery first.', [{ text: 'OK' }]);
+      return;
+    }
 
     setIsDetecting(true);
+    setLastError(null);
     
-    try {
-      // Prepare multipart form data
-      const form = new FormData();
-      const mime = getMimeFromUri(selectedImage);
-      const ext = mime.split('/')[1] || 'jpg';
-      const filename = `image.${ext}`;
-      form.append('file', {
-        uri: selectedImage,
-        name: filename,
-        type: mime,
-      } as any);
+    const fetchWithTimeout = async (input: RequestInfo | URL, init: RequestInit & { timeoutMs?: number } = {}) => {
+      const { timeoutMs = 25000, ...rest } = init;
+      const controller = new AbortController();
+      const id = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await fetch(input, { ...rest, signal: controller.signal });
+        return res;
+      } finally {
+        clearTimeout(id);
+      }
+    };
 
+    try {
       const confidence = 0.3;
-      const apiUrl = `${API_BASE}/detect-image?confidence=${confidence}`;
-      const response = await fetch(apiUrl, {
-        method: 'POST',
-        headers: {
-          Accept: 'image/png',
-        },
-        body: form,
-      });
+      const detectSize = 640; // resize long side for better boxes/speed
+      const classifyMode = 'warp'; // full-image scaling for better generic labels
+      const annotateUrl = `${API_BASE}/detect-image?confidence=${confidence}&detect_size=${detectSize}&classify_mode=${classifyMode}`;
+
+      let response: Response;
+
+      if (Platform.OS === 'web') {
+        const picked = await fetch(selectedImage);
+        const fileBlob = await picked.blob();
+        const formData = new FormData();
+        const mime = fileBlob.type || 'image/jpeg';
+        formData.append('file', new File([fileBlob], 'image.jpg', { type: mime }));
+        response = await fetchWithTimeout(annotateUrl, {
+          method: 'POST',
+          headers: { Accept: 'image/png' },
+          body: formData,
+          timeoutMs: 30000,
+        });
+      } else {
+        const mime = getMimeFromUri(selectedImage);
+        const ext = mime.split('/')[1] || 'jpg';
+        const filename = `image.${ext}`;
+        const form = new FormData();
+        form.append('file', { uri: selectedImage, name: filename, type: mime } as any);
+        response = await fetchWithTimeout(annotateUrl, {
+          method: 'POST',
+          headers: { Accept: 'image/png' },
+          body: form,
+          timeoutMs: 30000,
+        });
+      }
 
       if (!response.ok) {
         const contentType = response.headers.get('content-type') || '';
-        const text = await response.text();
         let message = 'Detection failed';
         try {
           if (contentType.includes('application/json')) {
-            const json = JSON.parse(text);
-            message = json.detail || JSON.stringify(json);
-          } else if (text) {
-            message = text;
+            const json = await response.json();
+            message = json.detail || json.message || JSON.stringify(json);
+          } else {
+            const text = await response.text();
+            if (text) message = text;
           }
         } catch {}
         throw new Error(message);
@@ -155,31 +207,105 @@ export default function HomeScreen() {
       const processingTime = response.headers.get('X-Processing-Time') || '';
       const originalWidth = response.headers.get('X-Image-Width') || '';
       const originalHeight = response.headers.get('X-Image-Height') || '';
+      let clsLabel = response.headers.get('X-Cls-Label') || '';
+      let clsProb = response.headers.get('X-Cls-Prob') || '';
 
-      const buffer = await response.arrayBuffer();
-      const base64 = encodeBase64(new Uint8Array(buffer));
-      const annotatedImageUri = `data:image/png;base64,${base64}`;
+      // If classification headers not present, call /classify as a fallback
+      if (!clsLabel) {
+        try {
+          const classifyUrl = `${API_BASE}/classify`;
+          if (Platform.OS === 'web') {
+            const picked = await fetch(selectedImage);
+            const fileBlob = await picked.blob();
+            const formData = new FormData();
+            const mime = fileBlob.type || 'image/jpeg';
+            formData.append('file', new File([fileBlob], 'image.jpg', { type: mime }));
+            const classifyRes = await fetch(classifyUrl, { method: 'POST', body: formData });
+            if (classifyRes.ok) {
+              const json = await classifyRes.json();
+              clsLabel = json?.classification?.top1?.label || '';
+              const p = json?.classification?.top1?.probability;
+              clsProb = typeof p === 'number' ? String(p) : '';
+            }
+          } else {
+            const mime = getMimeFromUri(selectedImage);
+            const ext = mime.split('/')[1] || 'jpg';
+            const filename = `image.${ext}`;
+            const form2 = new FormData();
+            form2.append('file', { uri: selectedImage, name: filename, type: mime } as any);
+            const classifyRes = await fetch(classifyUrl, { method: 'POST', body: form2 });
+            if (classifyRes.ok) {
+              const json = await classifyRes.json();
+              clsLabel = json?.classification?.top1?.label || '';
+              const p = json?.classification?.top1?.probability;
+              clsProb = typeof p === 'number' ? String(p) : '';
+            }
+          }
+        } catch {}
+      }
+
+      const blob = await response.blob();
+      const dataUrl: string = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(typeof reader.result === 'string' ? reader.result : '');
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+
+      let annotatedUriToPass = dataUrl;
+      if (Platform.OS !== 'web') {
+        try {
+          const base64Data = dataUrl.split(',')[1] || '';
+          const fileUri = `${FileSystem.cacheDirectory}annotated_${Date.now()}.png`;
+          await FileSystem.writeAsStringAsync(fileUri, base64Data, { encoding: FileSystem.EncodingType.Base64 });
+          annotatedUriToPass = fileUri;
+        } catch {}
+      }
 
       router.push({
         pathname: '/results',
         params: {
           imageUri: selectedImage,
-          annotatedUri: annotatedImageUri,
+          annotatedUri: annotatedUriToPass,
           detectionsCount,
           processingTime,
           originalWidth,
           originalHeight,
+          clsLabel,
+          clsProb,
+          // Provide a caption fallback as a convenience for the results screen
+          caption: clsLabel || '',
         },
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to detect objects. Please try again.';
-      Alert.alert(
-        'Error',
-        message,
-        [{ text: 'OK' }]
-      );
+      let message = 'Failed to detect objects. Please try again.';
+      if (error instanceof Error) {
+        if (error.name === 'AbortError') {
+          message = 'Request timed out. Ensure backend is running on the same host/port.';
+        } else if (/Network request failed|ERR_CONNECTION/i.test(error.message)) {
+          message = 'Network error. Ensure backend is reachable at ' + API_BASE + ' and CORS is enabled.';
+        } else {
+          message = error.message;
+        }
+      }
+      setLastError(message);
+      Alert.alert('Error', message, [{ text: 'OK' }]);
     } finally {
       setIsDetecting(false);
+    }
+  };
+
+  const handleTestConnection = async () => {
+    setHealthStatus(null);
+    setLastError(null);
+    try {
+      const res = await fetch(`${API_BASE}/health`, { method: 'GET' });
+      if (!res.ok) throw new Error(`Health check failed (${res.status})`);
+      const json = await res.json();
+      setHealthStatus(`OK • model_loaded=${json.model_loaded} • device=${json.device}`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Failed to reach backend';
+      setLastError(`Health error: ${msg}`);
     }
   };
 
@@ -215,9 +341,7 @@ export default function HomeScreen() {
             activeOpacity={0.8}
           >
             <Ionicons name="camera" size={24} color={tintColor} />
-            <ThemedText style={[styles.sourceButtonText, { color: tintColor }]}>
-              Camera
-            </ThemedText>
+            <ThemedText style={[styles.sourceButtonText, { color: tintColor }]}>Camera</ThemedText>
           </TouchableOpacity>
 
           <TouchableOpacity
@@ -226,9 +350,25 @@ export default function HomeScreen() {
             activeOpacity={0.8}
           >
             <Ionicons name="images" size={24} color={tintColor} />
-            <ThemedText style={[styles.sourceButtonText, { color: tintColor }]}>
-              Gallery
-            </ThemedText>
+            <ThemedText style={[styles.sourceButtonText, { color: tintColor }]}>Gallery</ThemedText>
+          </TouchableOpacity>
+        </View>
+
+        {/* Diagnostics */}
+        <View style={{ marginBottom: 10 }}>
+          <ThemedText style={{ fontSize: 12, opacity: 0.8 }}>API: {API_BASE}</ThemedText>
+          {healthStatus ? (
+            <ThemedText style={{ fontSize: 12, color: '#2e7d32' }}>{healthStatus}</ThemedText>
+          ) : null}
+          {lastError ? (
+            <ThemedText style={{ fontSize: 12, color: '#b00020' }}>{lastError}</ThemedText>
+          ) : null}
+          <TouchableOpacity
+            style={{ marginTop: 6, alignSelf: 'flex-start', paddingVertical: 6, paddingHorizontal: 10, borderRadius: 8, borderWidth: 1, borderColor: '#ccc' }}
+            onPress={handleTestConnection}
+            activeOpacity={0.8}
+          >
+            <ThemedText>Test Connection</ThemedText>
           </TouchableOpacity>
         </View>
 
@@ -243,12 +383,13 @@ export default function HomeScreen() {
           ) : (
             <View style={styles.placeholderContainer}>
               <Ionicons name="image-outline" size={48} color="#ccc" />
-              <ThemedText style={styles.placeholderText}>
-                No image selected
-              </ThemedText>
+              <ThemedText style={styles.placeholderText}>No image selected</ThemedText>
             </View>
           )}
         </View>
+        {selectedImage ? (
+          <ThemedText style={{ fontSize: 12, opacity: 0.6, marginBottom: 10 }}>Selected: {selectedImage}</ThemedText>
+        ) : null}
 
         {/* Detect Objects Button */}
         <TouchableOpacity

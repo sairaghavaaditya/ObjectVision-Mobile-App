@@ -1,4 +1,5 @@
 import Constants from 'expo-constants';
+import { Platform } from 'react-native';
 
 interface ExtraConfig {
   API_BASE?: string;
@@ -6,9 +7,21 @@ interface ExtraConfig {
 
 const extra = (Constants.expoConfig?.extra ?? {}) as ExtraConfig;
 
-// IMPORTANT: On a real device with Expo Go, 'localhost' points to the phone.
-// Set app.json > extra.API_BASE to your machine's LAN IP, e.g. "http://192.168.1.50:8000"
-export const API_BASE = extra.API_BASE || 'http://localhost:8000';
+function inferApiBase(): string {
+  if (Platform.OS === 'web') {
+    const host = typeof window !== 'undefined' && (window as any).location ? (window as any).location.hostname : 'localhost';
+    const normalizedHost = host === 'localhost' ? '127.0.0.1' : host;
+    return `http://${normalizedHost}:8000`;
+  }
+  if (extra.API_BASE) return extra.API_BASE;
+  
+  // For mobile devices, use your computer's IP address instead of localhost
+  // Your computer's IP address is: 192.168.29.242
+  // Make sure your mobile device and computer are on the same WiFi network
+  return 'http://192.168.29.242:8000';
+}
+
+export const API_BASE = inferApiBase();
 
 export function getMimeFromUri(uri: string): string {
   const lowered = uri.toLowerCase();
@@ -17,7 +30,6 @@ export function getMimeFromUri(uri: string): string {
   if (lowered.endsWith('.bmp')) return 'image/bmp';
   if (lowered.endsWith('.tiff') || lowered.endsWith('.tif')) return 'image/tiff';
   if (lowered.endsWith('.webp')) return 'image/webp';
-  // Fallback; many pickers return jpg
   return 'image/jpeg';
 }
 

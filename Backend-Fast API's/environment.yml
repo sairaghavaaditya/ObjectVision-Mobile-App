@@ -1,0 +1,20 @@
+name: objectvision
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.10
+  - numpy
+  - pandas
+  - pillow
+  - opencv
+  - requests
+  - pip
+  - pip:
+      - fastapi
+      - uvicorn
+      - python-multipart
+      - torch
+      - torchvision
+      - torchaudio
+      - tensorflow
