@@ -16,9 +16,9 @@ function inferApiBase(): string {
   if (extra.API_BASE) return extra.API_BASE;
   
   // For mobile devices, use your computer's IP address instead of localhost
-  // Your computer's IP address is: 192.168.29.242
+  // Your computer's IP address is: 192.168.1.6
   // Make sure your mobile device and computer are on the same WiFi network
-  return 'http://192.168.29.242:8000';
+  return 'http://192.168.1.6:8000';
 }
 
 export const API_BASE = inferApiBase();
